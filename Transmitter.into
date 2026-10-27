@@ -1,0 +1,122 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPI.h>
+#include <RF24.h>
+
+const char* ssid = "ESP32-TX";
+const char* password = "chat12345";
+
+WebServer server(80);
+RF24 radio(4, 5);
+
+const byte addressTX[6] = "TX001";
+const byte addressRX[6] = "RX001";
+
+String chatHistory = "";
+bool radioReady = false;
+
+void handleRoot() {
+  String page = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TX Chat</title>
+</head>
+<body>
+<h2>Phone 1 - Chat</h2>
+<div id="chat"></div>
+<input id="msg" maxlength="31" placeholder="Type message">
+<button onclick="sendMsg()">Send</button>
+<script>
+async function refreshChat(){
+ let r=await fetch('/messages');
+ document.getElementById('chat').innerHTML=await r.text();
+}
+async function sendMsg(){
+ let b=document.getElementById('msg');
+ let m=b.value.trim();
+ if(!m)return;
+ let r=await fetch('/send?msg='+encodeURIComponent(m));
+ alert(await r.text());
+ b.value='';
+ refreshChat();
+}
+setInterval(refreshChat,1000);
+refreshChat();
+</script>
+</body>
+</html>
+)rawliteral";
+  server.send(200, "text/html", page);
+}
+
+void handleSend() {
+  String msg = server.arg("msg");
+  msg.trim();
+
+  if (!radioReady || msg.length() == 0) {
+    server.send(200, "text/plain", "Radio not ready or empty message");
+    return;
+  }
+
+  char payload[32] = {0};
+  msg.substring(0, 31).toCharArray(payload, sizeof(payload));
+
+  radio.stopListening();
+  radio.openWritingPipe(addressRX);
+  bool sent = radio.write(payload, sizeof(payload));
+  radio.startListening();
+
+  if (sent) {
+    chatHistory += "<p><b>You:</b> " + msg + "</p>";
+    server.send(200, "text/plain", "Sent to RX");
+  } else {
+    server.send(200, "text/plain", "Send failed - check RX radio");
+  }
+}
+
+void handleMessages() {
+  server.send(200, "text/html", chatHistory);
+}
+
+void setup() {
+  Serial.begin(115200);
+  SPI.begin(18, 19, 23, 5);
+
+  radioReady = radio.begin();
+  if (radioReady) {
+    radio.setChannel(76);
+    radio.setDataRate(RF24_250KBPS);
+    radio.setPALevel(RF24_PA_LOW);
+    radio.setAutoAck(true);
+    radio.openReadingPipe(1, addressTX);
+    radio.startListening();
+  }
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid, password);
+
+  server.on("/", handleRoot);
+  server.on("/send", handleSend);
+  server.on("/messages", handleMessages);
+  server.begin();
+
+  Serial.println("TX Chat Server Ready");
+  Serial.println(WiFi.softAPIP());
+  Serial.println(radioReady ? "Radio Ready" : "Radio Not Detected");
+}
+
+void loop() {
+  server.handleClient();
+
+  if (radioReady && radio.available()) {
+    char payload[32] = {0};
+    radio.read(payload, sizeof(payload));
+    if (payload[0] != '\0') {
+      chatHistory += "<p><b>Phone 2:</b> ";
+      chatHistory += payload;
+      chatHistory += "</p>";
+    }
+  }
+}
